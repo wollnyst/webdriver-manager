@@ -1,0 +1,27 @@
+"use strict";
+const http = require("http");
+describe('sever smoke tests', () => {
+    it('should be able to ping selenium server', (done) => {
+        http.get('http://localhost:4444/selenium-server/driver/?cmd=getLogMessages', (resp) => {
+            expect(resp.statusCode).toBe(200);
+            let logs = '';
+            resp.on('data', (chunk) => logs += chunk);
+            resp.on('end', () => {
+                expect(logs).toContain('OK');
+                done();
+            });
+        });
+    });
+    it('should be able to ping appium server', (done) => {
+        http.get('http://localhost:4723/wd/hub/status', (resp) => {
+            expect(resp.statusCode).toBe(200);
+            let data = '';
+            resp.on('data', (chunk) => data += chunk);
+            resp.on('end', () => {
+                expect(JSON.parse(data).status).toBe(0);
+                done();
+            });
+        });
+    });
+});
+//# sourceMappingURL=server_spec.js.map
