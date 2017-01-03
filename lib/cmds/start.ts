@@ -59,6 +59,8 @@ if (argv._[0] === 'start-run') {
   prog.printHelp();
 }
 
+let seleniumProcess: ChildProcess;
+
 // Manage processes used in android emulation
 let androidProcesses: ChildProcess[] = [];
 let androidActiveAVDs: string[] = [];
@@ -106,7 +108,8 @@ function start(options: Options) {
       chromeLogs = path.resolve(Config.getBaseDir(), options[Opt.CHROME_LOGS].getString());
     }
   }
-  binaries[StandAlone.id].versionCustom = options[Opt.VERSIONS_STANDALONE].getString();
+  let seleniumStandaloneVersion = options[Opt.VERSIONS_STANDALONE].getString();
+  binaries[StandAlone.id].versionCustom = seleniumStandaloneVersion;
   binaries[ChromeDriver.id].versionCustom = options[Opt.VERSIONS_CHROME].getString();
   if (options[Opt.VERSIONS_IE]) {
     binaries[IEDriver.id].versionCustom = options[Opt.VERSIONS_IE].getString();
@@ -201,17 +204,18 @@ function start(options: Options) {
   }
   logger.info('java' + argsToString);
 
-  let seleniumProcess = spawn('java', args, stdio);
+  seleniumProcess = spawn('java', args, stdio);
   if (options[Opt.STARTED_SIGNIFIER].getString()) {
     signalWhenReady(
         options[Opt.STARTED_SIGNIFIER].getString(), options[Opt.SIGNAL_VIA_IPC].getBoolean(),
-        outputDir, seleniumPort, downloadedBinaries[Appium.id] ? appiumPort : '',
-        binaries[AndroidSDK.id], avdPort, androidActiveAVDs);
+        outputDir, seleniumPort, options[Opt.VERSIONS_STANDALONE].getString(),
+        downloadedBinaries[Appium.id] ? appiumPort : '', binaries[AndroidSDK.id], avdPort,
+        androidActiveAVDs);
   }
   logger.info('seleniumProcess.pid: ' + seleniumProcess.pid);
   seleniumProcess.on('exit', (code: number) => {
     logger.info('Selenium Standalone has exited with code ' + code);
-    shutdownEverything();
+    shutdownEverything(seleniumStandaloneVersion);
     process.exit(process.exitCode || code);
   });
   seleniumProcess.on('error', (error: Error) => {
@@ -220,11 +224,11 @@ function start(options: Options) {
   process.stdin.resume();
   process.stdin.on('data', (chunk: Buffer) => {
     logger.info('Attempting to shut down selenium nicely');
-    shutdownEverything(seleniumPort);
+    shutdownEverything(seleniumStandaloneVersion, seleniumPort);
   });
   process.on('SIGINT', () => {
     logger.info('Staying alive until the Selenium Standalone process exits');
-    shutdownEverything(seleniumPort);
+    shutdownEverything(seleniumStandaloneVersion, seleniumPort);
   });
 }
 
@@ -306,8 +310,9 @@ function killAppium() {
 
 
 function signalWhenReady(
-    signal: string, viaIPC: boolean, outputDir: string, seleniumPort: string, appiumPort: string,
-    androidSDK: Binary, avdPort: number, avdNames: string[]) {
+    signal: string, viaIPC: boolean, outputDir: string, seleniumPort: string,
+    seleniumStandaloneVersion: string, appiumPort: string, androidSDK: Binary, avdPort: number,
+    avdNames: string[]) {
   const maxWait = 10 * 60 * 1000;  // Ten minutes
   function waitFor(
       getStatus: () => Promise<string>, testStatus: (status: string) => boolean, desc?: string) {
@@ -394,14 +399,27 @@ function signalWhenReady(
               });
         });
   }
-  let pending = [waitFor(
-      () => {
-        return request('GET', seleniumPort, '/selenium-server/driver/?cmd=getLogMessages', maxWait);
-      },
-      (logs) => {
-        return logs.toUpperCase().indexOf('OK') != -1;
-      },
-      'selenium server')];
+  let pending = [];
+  if (seleniumStandaloneVersion.startsWith('2')) {
+    pending.push(waitFor(
+        () => {
+          return request(
+              'GET', seleniumPort, '/selenium-server/driver/?cmd=getLogMessages', maxWait);
+        },
+        (logs) => {
+          return logs.toUpperCase().indexOf('OK') != -1;
+        },
+        'selenium server'));
+  } else {
+    pending.push(waitFor(
+        () => {
+          return request('GET', seleniumPort, '/wd/hub/status', maxWait);
+        },
+        (status) => {
+          return JSON.parse(status).status == 0;
+        },
+        'appium server'));
+  }
   if (appiumPort) {
     pending.push(waitFor(
         () => {
@@ -424,7 +442,7 @@ function signalWhenReady(
       },
       (error) => {
         logger.error(error);
-        shutdownEverything(seleniumPort);
+        shutdownEverything(seleniumStandaloneVersion, seleniumPort);
         process.exitCode = 1;
       });
 }
@@ -440,10 +458,15 @@ function sendStartedSignal(signal: string, viaIPC: boolean) {
   console.log(signal);
 }
 
-function shutdownEverything(seleniumPort?: string) {
+function shutdownEverything(seleniumStandaloneVersion: string, seleniumPort?: string) {
   if (seleniumPort) {
-    http.get(
-        'http://localhost:' + seleniumPort + '/selenium-server/driver/?cmd=shutDownSeleniumServer');
+    if (seleniumStandaloneVersion.startsWith('2')) {
+      http.get(
+          'http://localhost:' + seleniumPort +
+          '/selenium-server/driver/?cmd=shutDownSeleniumServer');
+    } else {
+      seleniumProcess.kill();
+    }
   }
   killAndroid();
   killAppium();
